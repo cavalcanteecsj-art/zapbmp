@@ -8,6 +8,7 @@ import qrcode from 'qrcode-terminal';
 import pino from 'pino';
 import http from 'http';
 import { promises as fs } from 'fs';
+import QRCode from 'qrcode';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
@@ -226,7 +227,6 @@ http
     canvas{border:1px solid #eee;border-radius:8px}
     .status{font-weight:600}
   </style>
-  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
   <script>
     const api = {
       async status(){
@@ -254,28 +254,45 @@ http
     async function render(){
       const elStatus=document.getElementById('status');
       const elHasQR=document.getElementById('hasqr');
-      const canvas=document.getElementById('qr');
+      const img=document.getElementById('qrimg');
       const copy=document.getElementById('copy');
       try{
         const s=await api.status();
         elStatus.textContent=s.status;
         elHasQR.textContent=s.hasQR?'sim':'não';
         if(s.hasQR){
-          const {qr}=await api.qr();
-          await QRCode.toCanvas(canvas, qr, { width: 256 });
-          copy.value=qr;
-          canvas.style.display='block';
+          try{
+            const {qr}=await api.qr();
+            copy.value=qr;
+          }catch(_){/* mantém valor anterior em caso de corrida */}
+          try{
+            const resp = await fetch('/instance/qr.png?ts=' + Date.now());
+            if (resp.ok) {
+              copy.value = resp.headers.get('x-qr') || copy.value || '';
+            }
+          }catch(_){/* ignore */}
+          img.src='/instance/qr.png?ts=' + Date.now();
+          img.style.display='block';
         }else{
-          canvas.style.display='none';
+          img.style.display='none';
+          img.src='';
           copy.value='';
         }
+        // fallback: tenta buscar QR mesmo em caso de corrida
+        try {
+          const { qr } = await api.qr();
+          copy.value = qr;
+          img.src = '/instance/qr.png?ts=' + Date.now();
+          img.style.display = 'block';
+          elHasQR.textContent = 'sim';
+        } catch (_) {}
       }catch(e){
         elStatus.textContent='erro';
       }
     }
     function startPolling(){
       stopPolling();
-      polling=setInterval(render, 3000);
+      polling=setInterval(render, 2000);
     }
     function stopPolling(){ if(polling) clearInterval(polling); polling=null; }
     window.addEventListener('DOMContentLoaded',()=>{
@@ -294,6 +311,7 @@ http
         catch{ alert('Falha ao reiniciar.'); }
       });
       render();
+      startPolling();
     });
   </script>
 </head>
@@ -311,7 +329,7 @@ http
     </div>
   </div>
   <div class="card">
-    <div class="row"><canvas id="qr" width="256" height="256" style="display:none"></canvas></div>
+    <div class="row"><img id="qrimg" width="256" height="256" style="display:none" alt="QR Code" /></div>
     <div class="row" style="margin-top:8px;">
       <label class="muted">Conteúdo do QR:</label>
       <input type="text" id="copy" readonly>
@@ -337,6 +355,28 @@ http
       if (url === '/instance/qr' && method === 'GET') {
         if (!latestQR) return sendJson(res, 404, { error: 'no_qr' });
         return sendJson(res, 200, { qr: latestQR });
+      }
+
+      if (url === '/instance/qr.png' && method === 'GET') {
+        if (!latestQR) {
+          res.statusCode = 404;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify({ error: 'no_qr' }));
+          return;
+        }
+        try {
+          const buf = await QRCode.toBuffer(latestQR, { width: 256 });
+          res.statusCode = 200;
+          res.setHeader('content-type', 'image/png');
+          res.setHeader('x-qr', latestQR);
+          res.setHeader('cache-control', 'no-store');
+          res.end(buf);
+        } catch (e) {
+          res.statusCode = 500;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify({ error: 'qr_render_failed' }));
+        }
+        return;
       }
 
       if (url === '/instance/reset' && method === 'POST') {
